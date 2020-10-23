@@ -6,6 +6,7 @@ from tensorflow.keras.applications.resnet_v2 import ResNet50V2
 
 from model_util import load_mean_theta
 
+
 class Generator(Model):
     def __init__(self, args, encoder_shape=(224, 224, 3)):
         super().__init__(name="Generator")
@@ -37,12 +38,12 @@ class Generator(Model):
             trainable=True)
 
     
-    def call(self, x):
+    def call(self, x, training):
         # Get the batch size
         batch_size = x.shape[0]
 
         # Encode the image
-        img_features = self._encoder(x)
+        img_features = self._encoder(x, training=training)
 
         # Create mean_theta for every batchmodels 
         cur_theta = tf.tile(self._mean_theta, [batch_size, 1])
@@ -57,9 +58,9 @@ class Generator(Model):
             
             # Run through regressor to get theta update
             state = self._dense_1(state)
-            state = self._dropout_1(state)
+            state = self._dropout_1(state, training=training)
             state = self._dense_2(state)
-            state = self._dropout_2(state)
+            state = self._dropout_2(state, training=training)
             theta_residuals = self._reg_out(state)
             
             # Update the current theta estimates by the predicted residual estimate
