@@ -1,8 +1,9 @@
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import  Model
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras import layers
 from tensorflow.keras.applications.resnet_v2 import ResNet50V2
+from tensorflow.keras.regularizers import l2
 
 from model_util import load_mean_theta
 
@@ -20,15 +21,15 @@ class Generator(Model):
             pooling="avg")
 
         # Build the Regressor that will perform IEF
-        self._dense_1 = Dense(1024, activation="relu")
-        self._dense_2 = Dense(1024, activation="relu")
-        self._dropout_1 = Dropout(0.5)
-        self._dropout_2 = Dropout(0.5)
+        self._dense_1 = layers.Dense(1024, activation="relu")
+        self._dense_2 = layers.Dense(1024, activation="relu")
+        self._dropout_1 = layers.Dropout(0.5)
+        self._dropout_2 = layers.Dropout(0.5)
         small_xavier = tf.initializers.VarianceScaling(
             .01,
             mode='fan_avg',
             distribution='uniform')
-        self._reg_out = Dense(85, kernel_initializer=small_xavier)
+        self._reg_out = layers.Dense(85, kernel_initializer=small_xavier)
 
         # Load the initial mean theta params and create
         # a trainable variable for it
@@ -80,10 +81,71 @@ class Generator(Model):
             outputs.append(tf.tuple([cams, poses, shapes]))
         return outputs
 
-            
-            
+class Discriminator(Model):
+    def __init__(self, args, encoder_shape=(224, 224, 3)):
+        super().__init__(name="Discriminator")
+        self._args = args
+        
+        # Create the common embedding layers for the rotations
+        self._conv1d_emb_1 = layers.Conv1D(filters=32, kernel_size=1, activation="relu", name="common_emb_1")
+        self._conv1d_emb_2 = layers.Conv1D(filters=32, kernel_size=1, activation="relu", name="common_emb_2")
 
-            
+        # Create the joint discriminators
+        disc_l2_reg = l2(self._args.disc_weight_decay)
+        self._joint_discs = []
+        for i in range(self._args.num_joints):
+            self._joint_discs.append(
+                layers.Dense(
+                    1,
+                    kernel_regularizer=disc_l2_reg,
+                    name="joint_{}_disc".format(i)))
+
+        # Create full pose discriminator
+        self._flatten = layers.Flatten()
+        self._pose_dense_1 = layers.Dense(1024, kernel_regularizer=disc_l2_reg, activation="relu", name="pose_dense_1")
+        self._pose_dense_2 = layers.Dense(1024, kernel_regularizer=disc_l2_reg, activation="relu", name="pose_dense_2")
+        self._pose_disc_out = layers.Dense(1, kernel_regularizer=disc_l2_reg, name="pose_disc_out")
+
+        # Create shape discriminator
+        self._shape_dense_1 = layers.Dense(10, kernel_regularizer=disc_l2_reg, activation="relu", name="shape_dense_1") 
+        self._shape_dense_2 = layers.Dense(5, kernel_regularizer=disc_l2_reg, activation="relu", name="shape_dense_2")
+        self._shape_disc_out = layers.Dense(1, kernel_regularizer=disc_l2_reg, name="shape_disc_out")
+
+    def __call__(self, x):
+        print("x.shape:", x.shape)
+        poses = x[:, :self._args.num_joints * 9]
+        shapes = x[:, -self._args.num_shape_param:]
+        poses = tf.reshape(poses, [poses.shape[0], self._args.num_joints, 9])
+
+        # Embed rotation matrices
+        pose_embs = self._conv1d_emb_1(poses)
+        pose_embs = self._conv1d_emb_2(pose_embs)
+        #print("pose_embs.shape", pose_embs.shape)
+        
+        
+        # Call each joint embedding on individual distriminator
+        joint_disc_outputs = []
+        for i in range(self._args.num_joints):
+            joint_disc_outputs.append(self._joint_discs[i](pose_embs[:, i, :]))
+        joint_disc_outputs = tf.squeeze(tf.stack(joint_disc_outputs, 1))
+
+        # Run full pose discriminator
+        pose_embs = self._flatten(pose_embs)
+        pose_embs = self._pose_dense_1(pose_embs)
+        pose_embs = self._pose_dense_2(pose_embs)
+        pose_disc_output = self._pose_disc_out(pose_embs)
+
+        # Run shape discriminator
+        shapes = self._shape_dense_1(shapes)
+        shapes = self._shape_dense_2(shapes)
+        shape_disc_output = self._shape_disc_out(shapes)
+        # print("joint_disc_outputs.shape", joint_disc_outputs.shape)
+        # print("pose_disc_output.shape", pose_disc_output.shape)
+        # print("shape_disc_output.shape", shape_disc_output.shape)
+
+        return tf.concat((joint_disc_outputs, pose_disc_output, shape_disc_output), 1)
+        
+        
             
 
 # num_cam_param

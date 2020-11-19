@@ -160,3 +160,18 @@ def batch_orthographic_projection(kp3d, camera):
     kp2d = camera[:, :, 0] * kp_trans
 
     return tf.reshape(kp2d, shape)
+
+
+
+# def accumulate_fake_disc_input(generator_outputs):
+#     fake_poses, fake_shapes = [], []
+#     for output in generator_outputs:
+#         fake_poses.append(output[3])
+#         fake_shapes.append(output[4])
+#     # ignore global rotation
+#     fake_poses = tf.reshape(tf.convert_to_tensor(fake_poses), [-1, self.config.NUM_JOINTS_GLOBAL, 9])[:, 1:, :]
+#     fake_poses = tf.reshape(fake_poses, [-1, self.config.NUM_JOINTS * 9])
+#     fake_shapes = tf.reshape(tf.convert_to_tensor(fake_shapes), [-1, self.config.NUM_SHAPE_PARAMS])
+
+#     fake_disc_input = tf.concat([fake_poses, fake_shapes], 1)
+# return fake_disc_input
