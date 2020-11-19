@@ -1,13 +1,16 @@
 import tensorflow as tf
 import scipy.io as sio
 import numpy as np
-import os
+import os, pickle
+
+LSP_DATASET_SIZE = 10000
 
 # TODO: Add data augmentations (e.g., random jitter, crop, flip, ect.)
 SHUFFLE_BUFFER_SIZE = 60000
 class DataLoader:
     def __init__(self, args):
         self._args = args
+        #self._smpl_datafiles = self._get_smpl_datafiles()
 
     def load_lsp_dataset(self):
         # Load the joints (14, 3, 10000)
@@ -35,6 +38,44 @@ class DataLoader:
         lsp_test_ds = lsp_test_ds.shuffle(SHUFFLE_BUFFER_SIZE).batch(self._args.batch_size)        
         return lsp_train_ds, lsp_test_ds
 
+    def load_smpl_dataset(self):
+        poses, shapes = self._get_smpl_data()
+        smpl_data = np.concatenate((poses,shapes), axis=-1)
+        train_size = int(smpl_data.shape[0] * self._args.train_split) 
+        smpl_train_ds = tf.data.Dataset.from_tensor_slices(smpl_data[:train_size])
+        smpl_test_ds = tf.data.Dataset.from_tensor_slices(smpl_data[train_size:])
+
+        smpl_train_ds = smpl_train_ds.shuffle(SHUFFLE_BUFFER_SIZE).batch(self._args.batch_size)
+        smpl_test_ds = smpl_test_ds.shuffle(SHUFFLE_BUFFER_SIZE).batch(self._args.batch_size)
+        return smpl_train_ds, smpl_test_ds
+
+        
+
+    
+    def _get_smpl_data(self):
+        poses = []
+        shapes = []
+        
+        cur_loaded = 0
+        # Recursively go through all the files
+        for root, dirs, files in os.walk(self._args.smpl_params):
+            cur_loaded += 1
+            if cur_loaded > self._args.max_smpl_load:
+                break
+            # For each directory
+            for datafile in files:
+                if ".pkl" == datafile[-4:]:
+                    data_path = os.path.join(root, datafile)
+                    with open(data_path, "rb") as f:
+                        cur_data = pickle.load(f, encoding="latin-1")
+                        cur_poses = cur_data["poses"]
+                        cur_shapes = np.tile(cur_data["betas"], (cur_poses.shape[0], 1))
+                        #print(cur_poses.shape)
+                        for i in range(cur_poses.shape[0]):
+                            poses.append(cur_poses[i])
+                            shapes.append(cur_shapes[i])        
+        
+        return np.array(poses), np.array(shapes)
 
     def _preprocess(self, img_path, kp2d):
         kp2d = tf.cast(kp2d, tf.float32)

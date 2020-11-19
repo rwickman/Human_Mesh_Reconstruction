@@ -18,9 +18,19 @@ if __name__ == "__main__":
     parser.add_argument("--img_height", type=int, default=224)
     parser.add_argument("--img_width", type=int, default=224)
     parser.add_argument("--img_size", type=int, default=224)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--gen_lr", type=float, default=1e-5)
     parser.add_argument("--disc_lr", type=float, default=1e-4)
     parser.add_argument("--joint_type", default="lsp")
+    parser.add_argument("--gen_2d_loss_weight", type=float, default=60)
+    parser.add_argument("--disc_loss_weight", type=float, default=60)
+    parser.add_argument("--disc_weight_decay", type=float, default=1e-4)
+    parser.add_argument("--num_joints", type=int, default=23)
+    parser.add_argument("--smpl_params", default="../datasets/neutrMosh/neutrSMPL_CMU/",
+            help="Path to SMPL params.")
+    parser.add_argument("--max_smpl_load", type=int, default=10,
+            help="Max number of SMPL data directories to read.")
+    parser.add_argument("--train_split", type=float, default=0.8,
+            help="Percentage of data to use in the training set.")
     args = parser.parse_args()
     main(args)
