@@ -35,10 +35,6 @@ def batch_rodrigues(theta, num_joints=24):
     batch_unit_norm_axis = tf.math.truediv(theta, batch_theta_norm)
     batch_skew_symm = batch_skew_symmetric(batch_unit_norm_axis)
 
-    batch_theta_norm = tf.expand_dims(tf.norm(theta + 1e-8, axis=2), -1)
-    batch_unit_norm_axis = tf.math.truediv(theta, batch_theta_norm)
-    batch_skew_symm = batch_skew_symmetric(batch_unit_norm_axis)
-
     batch_cos = tf.expand_dims(tf.cos(batch_theta_norm), -1)
     batch_sin = tf.expand_dims(tf.sin(batch_theta_norm), -1)
 
@@ -161,17 +157,147 @@ def batch_orthographic_projection(kp3d, camera):
 
     return tf.reshape(kp2d, shape)
 
+def batch_align_by_pelvis(kp3d):
+    """Assumes kp3d is [batch x 14 x 3] in LSP order. Then hips are id [2, 3].
+       Takes mid point of these points, then subtracts it.
+    Args:
+        kp3d: [batch x K x 3]
+    Returns:
+        aligned_kp3d: [batch x K x 3]
+    """
+    left_id, right_id = 3, 2
+    pelvis = (kp3d[:, left_id, :] + kp3d[:, right_id, :]) / 2.
+    return kp3d - tf.expand_dims(pelvis, axis=1)
 
 
-# def accumulate_fake_disc_input(generator_outputs):
-#     fake_poses, fake_shapes = [], []
-#     for output in generator_outputs:
-#         fake_poses.append(output[3])
-#         fake_shapes.append(output[4])
-#     # ignore global rotation
-#     fake_poses = tf.reshape(tf.convert_to_tensor(fake_poses), [-1, self.config.NUM_JOINTS_GLOBAL, 9])[:, 1:, :]
-#     fake_poses = tf.reshape(fake_poses, [-1, self.config.NUM_JOINTS * 9])
-#     fake_shapes = tf.reshape(tf.convert_to_tensor(fake_shapes), [-1, self.config.NUM_SHAPE_PARAMS])
+def batch_compute_similarity_transform(real_kp3d, pred_kp3d):
+    """Computes a similarity transform (sR, trans) that takes
+        a set of 3D points S1 (3 x N) closest to a set of 3D points S2,
+        where R is an 3x3 rotation matrix, trans 3x1 translation, u scale.
+        i.e. solves the orthogonal Procrustes problem.
+    Args:
+        real_kp3d: [batch x K x 3]
+        pred_kp3d: [batch x K x 3]
+    Returns:
+        aligned_kp3d: [batch x K x 3]
+    """
+    # transpose to [batch x 3 x K]
+    real_kp3d = tf.transpose(real_kp3d, perm=[0, 2, 1])
+    pred_kp3d = tf.transpose(pred_kp3d, perm=[0, 2, 1])
 
-#     fake_disc_input = tf.concat([fake_poses, fake_shapes], 1)
-# return fake_disc_input
+    # 1. Remove mean.
+    mean_real = tf.reduce_mean(real_kp3d, axis=2, keepdims=True)
+    mean_pred = tf.reduce_mean(pred_kp3d, axis=2, keepdims=True)
+
+    centered_real = real_kp3d - mean_real
+    centered_pred = pred_kp3d - mean_pred
+
+    # 2. Compute variance of centered_real used for scale.
+    variance = tf.reduce_sum(centered_pred ** 2, axis=[-2, -1], keepdims=True)
+
+    # 3. The outer product of centered_real and centered_pred.
+    K = tf.matmul(centered_pred, centered_real, transpose_b=True)
+
+    # 4. Solution that Maximizes trace(R'K) is R=s*V', where s, V are
+    # singular vectors of K.
+    with tf.device('/CPU:0'):
+        # SVD is terrifyingly slow on GPUs, use cpus for this. Makes it a lot faster.
+        s, u, v = tf.linalg.svd(K, full_matrices=True)
+
+        # Construct identity that fixes the orientation of R to get det(R)=1.
+        det = tf.sign(tf.linalg.det(tf.matmul(u, v, transpose_b=True)))
+
+    det = tf.expand_dims(tf.expand_dims(det, -1), -1)
+    shape = tf.shape(u)
+    identity = tf.eye(shape[1], batch_shape=[shape[0]])
+    identity = identity * det
+
+    # Construct R.
+    R = tf.matmul(v, tf.matmul(identity, u, transpose_b=True))
+
+    # 5. Recover scale.
+    trace = tf.linalg.trace(tf.matmul(R, K))
+    trace = tf.expand_dims(tf.expand_dims(trace, -1), -1)
+    scale = trace / variance
+
+    # 6. Recover translation.
+    trans = mean_real - scale * tf.matmul(R, mean_pred)
+
+    # 7. Align
+    aligned_kp3d = scale * tf.matmul(R, pred_kp3d) + trans
+
+    return tf.transpose(aligned_kp3d, perm=[0, 2, 1])
+
+def pckh(kp2d, kp2d_pred, threshold = 0.5):
+    batch_size = kp2d.shape[0] 
+    head_pos = kp2d[:, 13, :2]
+    neck_pos = kp2d[:, 12, :2]
+    vis = kp2d[:, 12, 2] * kp2d[:, 13, 2]
+    head_bone_len = np.sum((head_pos - neck_pos) ** 2, axis=-1) * vis
+    head_bone_len = np.tile(np.reshape(head_bone_len, (batch_size, 1)), kp2d_pred.shape[1])
+
+    # Calculate distance to true joint position
+    joint_dists = np.sum((kp2d[:, :, :2] - kp2d_pred) ** 2, axis=-1)
+    
+    # Calculaute the pckh
+    
+    pckh = np.sum(joint_dists <  head_bone_len * threshold, axis=0)
+    num_vis = np.sum(head_bone_len > 0, axis=0)
+    return pckh, num_vis
+
+def pcp(kp2d, kp2d_pred, threshold=0.5):
+    """Percentage of Correct Parts (PCP)"""
+    batch_size = kp2d.shape[0] 
+    # ankle->knee (left and right), knee->hip (left and right)
+    leg_limbs = [(0, 1), (4,3), (1,2), (5,4)]
+    # wrist->elbow (left and right), elbow->shoulder (left and right)
+    arm_limbs = [(6, 7), (10, 9), (7, 8), (11, 10)]
+    
+    pcp_dict = {
+        "num_upper_arm_correct" : 0,
+        "num_upper_arm_visible" : 0,
+        "num_lower_arm_correct" : 0,
+        "num_lower_arm_visible" : 0,
+        "num_upper_leg_correct" : 0,
+        "num_upper_leg_visible" : 0,
+        "num_lower_leg_correct" : 0,
+        "num_lower_leg_visible" : 0
+    }
+    
+    for i, limbs in enumerate([leg_limbs, arm_limbs]):
+        for j, limb in enumerate(limbs):
+            limb_len = np.sum((kp2d[:, limb[0]] - kp2d[:, limb[1]]) ** 2, axis=-1)
+            # Get pairwise distance between the joints in each limb
+            joint_dist_1 = np.sum((kp2d[:, limb[0], :2] - kp2d_pred[:, limb[0]]) ** 2, axis=-1)
+            joint_dist_2 = np.sum((kp2d[:, limb[1], :2] - kp2d_pred[:, limb[1]]) ** 2, axis=-1)
+            # Only compute on limbs that are fully visible
+            vis = kp2d[:, limb[0], 2] * kp2d[:, limb[1], 2]
+            num_correct = np.sum((joint_dist_1 < threshold * limb_len * vis) * (joint_dist_2 < threshold * limb_len * vis))
+            if i == 0:
+                if j < 2:
+                    pcp_dict["num_lower_leg_correct"] += num_correct
+                    pcp_dict["num_lower_leg_visible"] += np.sum(vis)
+                else:
+                    pcp_dict["num_upper_leg_correct"] += num_correct
+                    pcp_dict["num_upper_leg_visible"] += np.sum(vis)
+            else:
+                if j < 2:
+                    pcp_dict["num_lower_arm_correct"] += num_correct
+                    pcp_dict["num_lower_arm_visible"] += np.sum(vis)
+                else:
+                    pcp_dict["num_upper_arm_correct"] += num_correct
+                    pcp_dict["num_upper_arm_visible"] += np.sum(vis)
+                    
+
+    return pcp_dict
+
+        
+
+def compute_pcp_avgs(pcp_dict):
+    result_dict = {}
+    result_dict["upper_arm_avg"] = pcp_dict["num_upper_arm_correct"] / pcp_dict["num_upper_arm_visible"]
+    result_dict["lower_arm_avg"] = pcp_dict["num_lower_arm_correct"] / pcp_dict["num_lower_arm_visible"]
+    result_dict["upper_leg_avg"] = pcp_dict["num_upper_leg_correct"] / pcp_dict["num_upper_leg_visible"]
+    result_dict["lower_leg_avg"] = pcp_dict["num_lower_leg_correct"] / pcp_dict["num_lower_leg_visible"]
+    result_dict["total_avg"] = sum([value for key, value in pcp_dict.items() if "correct" in key]) / sum([value for key, value in pcp_dict.items() if "visible" in key])
+    return result_dict

@@ -79,6 +79,7 @@ class Generator(Model):
             poses = thetas[i, :, self._args.num_cam_param : self._args.num_cam_param+self._args.num_pose_param]
             shapes = thetas[i, :, self._args.num_cam_param+self._args.num_pose_param : ]
             outputs.append(tf.tuple([cams, poses, shapes]))
+        #thetas.mark_used()
         return outputs
 
 class Discriminator(Model):
